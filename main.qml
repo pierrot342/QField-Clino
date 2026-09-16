@@ -3,291 +3,339 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import org.qfield
 import org.qgis
-import org.qfield.core
-import Theme
 
 Item {
-  id: plugin
+    id: plugin
 
-  property var mainWindow: iface.mainWindow()
-  property var mapCanvas: iface.mapCanvas()
-  property var positionSource: iface.findItemByObjectName("positionSource")
-  property var detectedLayer: null
+    property var mainWindow: iface.mainWindow()
+    property var mapCanvas: iface.mapCanvas()
+    property var positionSource: iface.findItemByObjectName("positionSource")
+    property var detectedLayer: null
 
-  property string lastUniteObs: ""
-  property string lastLithologie: ""
-  property string lastFacies: ""
-  property string gpsText: "GPS non vérifié"
-  property bool saving: false
+    property string lastUniteObs: ""
+    property string lastLithologie: ""
+    property string lastFacies: ""
+    property bool saving: false
 
-  Component.onCompleted: {
-    iface.addItemToPluginsToolbar(clinoButton)
-    mainWindow.displayToast("QField Clino v0.6 chargé")
-  }
-
-  function fieldNames(layer) {
-    if (!layer || !layer.fields) return []
-    try { return layer.fields.names } catch (e) { return [] }
-  }
-
-  function scoreLayer(layer) {
-    const n = fieldNames(layer)
-    let s = 0
-    const wanted = ["azimut", "pendage", "strike", "unite_obs", "unite_carte", "lithologie", "facies", "note", "date_heure"]
-    for (let i = 0; i < wanted.length; i++) {
-      if (n.indexOf(wanted[i]) >= 0) s++
-    }
-    const name = (layer.name || "").toLowerCase()
-    if (name.indexOf("pendage") >= 0 || name.indexOf("clino") >= 0) s += 2
-    return s
-  }
-
-  function findLayer() {
-    let layers = []
-    try { layers = mapCanvas.mapSettings.layers } catch (e) { return null }
-
-    let best = null
-    let bestScore = -1
-    for (let i = 0; i < layers.length; i++) {
-      const l = layers[i]
-      if (!l || !l.fields) continue
-      const s = scoreLayer(l)
-      if (s > bestScore) {
-        best = l
-        bestScore = s
-      }
-    }
-    detectedLayer = best
-    return best
-  }
-
-  function updateGps() {
-    if (!positionSource || !positionSource.active) {
-      gpsText = "GPS inactif — active le positionnement QField"
-      return false
+    function fieldExists(layer, fieldName) {
+        if (!layer || !layer.fields)
+            return false
+        return layer.fields.indexOf(fieldName) >= 0
     }
 
-    const info = positionSource.positionInformation
-    if (!info || !info.longitudeValid || !info.latitudeValid) {
-      gpsText = "GPS actif, mais pas encore de position valide"
-      return false
-    }
-
-    gpsText = "GPS : " + Number(info.latitude).toFixed(6) + ", " + Number(info.longitude).toFixed(6)
-    return true
-  }
-
-  function prepareForm() {
-    findLayer()
-    updateGps()
-    uniteObs.text = lastUniteObs
-    lithologie.text = lastLithologie
-    facies.text = lastFacies
-    uniteCarte.text = ""
-    saving = false
-  }
-
-  function setAttributeIfPresent(feature, layer, name, value) {
-    const idx = layer.fields.indexOf(name)
-    if (idx >= 0) feature.setAttribute(idx, value)
-  }
-
-  function parseRequiredNumber(text, label, minValue, maxValue) {
-    if (String(text).trim() === "") {
-      mainWindow.displayToast(label + " obligatoire")
-      return null
-    }
-    const v = Number(text)
-    if (!isFinite(v) || v < minValue || v > maxValue) {
-      mainWindow.displayToast(label + " invalide (" + minValue + " à " + maxValue + "°)")
-      return null
-    }
-    return Math.round(v)
-  }
-
-  function saveFeature() {
-    if (saving) return
-    saving = true
-
-    try {
-      const layer = detectedLayer || findLayer()
-      if (!layer) {
-        mainWindow.displayToast("ERREUR : couche de pendages introuvable")
-        saving = false
-        return
-      }
-
-      if (!updateGps()) {
-        mainWindow.displayToast("ERREUR : pas de position GPS valide")
-        saving = false
-        return
-      }
-
-      const az = parseRequiredNumber(azimut.text, "Azimut", 0, 359)
-      if (az === null) { saving = false; return }
-      const dip = parseRequiredNumber(pendage.text, "Pendage", 0, 90)
-      if (dip === null) { saving = false; return }
-
-      let str = null
-      if (String(strike.text).trim() !== "") {
-        const s = Number(strike.text)
-        if (!isFinite(s) || s < 0 || s > 359) {
-          mainWindow.displayToast("Strike invalide (0 à 359°)")
-          saving = false
-          return
+    function scoreLayer(layer) {
+        if (!layer || !layer.fields)
+            return -1
+        var score = 0
+        var expected = ["azimut", "pendage", "strike", "unite_obs", "unite_carte", "lithologie", "facies", "note", "date_heure"]
+        for (var i = 0; i < expected.length; ++i) {
+            if (fieldExists(layer, expected[i]))
+                score += 10
         }
-        str = Math.round(s)
-      }
-
-      const info = positionSource.positionInformation
-      const lon = Number(info.longitude)
-      const lat = Number(info.latitude)
-
-      // Construit d'abord une géométrie WGS84 sans accéder aux propriétés x/y d'un QgsPoint.
-      const wgsGeometry = QfGeometryUtils.createGeometryFromWkt("POINT(" + lon + " " + lat + ")")
-      const geometry = QfGeometryUtils.reprojectGeometry(wgsGeometry, QfCoordinateReferenceSystemUtils.wgs84Crs(), layer.crs)
-
-      if (!geometry) {
-        mainWindow.displayToast("ERREUR : géométrie GPS impossible à créer")
-        saving = false
-        return
-      }
-
-      // Même séquence que les tests officiels QField : startEditing -> feature -> addFeature -> commitChanges.
-      if (!layer.startEditing()) {
-        mainWindow.displayToast("ERREUR : couche non modifiable")
-        saving = false
-        return
-      }
-
-      let feature = QfFeatureUtils.createFeature(layer, geometry, info)
-      setAttributeIfPresent(feature, layer, "azimut", az)
-      setAttributeIfPresent(feature, layer, "pendage", dip)
-      if (str !== null) setAttributeIfPresent(feature, layer, "strike", str)
-      setAttributeIfPresent(feature, layer, "unite_carte", uniteCarte.text)
-      setAttributeIfPresent(feature, layer, "unite_obs", uniteObs.text)
-      setAttributeIfPresent(feature, layer, "lithologie", lithologie.text)
-      setAttributeIfPresent(feature, layer, "facies", facies.text)
-      setAttributeIfPresent(feature, layer, "note", note.text)
-      setAttributeIfPresent(feature, layer, "date_heure", new Date().toISOString())
-
-      const added = QfLayerUtils.addFeature(layer, feature)
-      if (!added) {
-        layer.rollBack()
-        mainWindow.displayToast("ERREUR : ajout du point refusé")
-        saving = false
-        return
-      }
-
-      const committed = layer.commitChanges()
-      if (!committed) {
-        layer.rollBack()
-        mainWindow.displayToast("ERREUR : sauvegarde GeoPackage refusée")
-        saving = false
-        return
-      }
-
-      lastUniteObs = uniteObs.text
-      lastLithologie = lithologie.text
-      lastFacies = facies.text
-
-      mainWindow.displayToast("OK — pendage enregistré dans " + layer.name)
-      clinoDialog.close()
-
-      azimut.text = ""
-      pendage.text = ""
-      strike.text = ""
-      note.text = ""
-      saving = false
-    } catch (e) {
-      saving = false
-      mainWindow.displayToast("ERREUR V0.6 : " + e)
+        if (layer.name && layer.name.toLowerCase().indexOf("pendage") >= 0)
+            score += 20
+        return score
     }
-  }
 
-  QfToolButton {
-    id: clinoButton
-    iconSource: Theme.getThemeVectorIcon("ic_explore_white_24dp")
-    iconColor: Theme.toolButtonColor
-    bgcolor: Theme.toolButtonBackgroundColor
-    round: true
-    onClicked: {
-      prepareForm()
-      clinoDialog.open()
+    function detectBestLayer() {
+        detectedLayer = null
+        var bestScore = -1
+        var layers = iface.mapCanvas().mapSettings.layers
+        for (var i = 0; i < layers.length; ++i) {
+            var s = scoreLayer(layers[i])
+            if (s > bestScore) {
+                bestScore = s
+                detectedLayer = layers[i]
+            }
+        }
+        return detectedLayer
     }
-  }
 
-  Dialog {
-    id: clinoDialog
-    parent: mainWindow.contentItem
-    modal: true
-    title: "QField Clino v0.6 — Nouveau pendage"
-    width: Math.min(parent.width - 20, 500)
-    height: Math.min(parent.height - 30, 760)
-    x: (parent.width - width) / 2
-    y: (parent.height - height) / 2
-
-    ScrollView {
-      anchors.fill: parent
-      contentWidth: availableWidth
-
-      ColumnLayout {
-        width: parent.width
-        spacing: 8
-
-        Label {
-          Layout.fillWidth: true
-          wrapMode: Text.WordWrap
-          text: detectedLayer ? "Couche : " + detectedLayer.name : "Couche pendages non détectée"
-        }
-        Label {
-          Layout.fillWidth: true
-          wrapMode: Text.WordWrap
-          text: gpsText
-        }
-        Button {
-          Layout.fillWidth: true
-          text: "Actualiser GPS"
-          onClicked: updateGps()
-        }
-
-        Label { text: "Azimut (°)" }
-        TextField { id: azimut; Layout.fillWidth: true; inputMethodHints: Qt.ImhFormattedNumbersOnly; placeholderText: "ex. 135" }
-
-        Label { text: "Pendage (°)" }
-        TextField { id: pendage; Layout.fillWidth: true; inputMethodHints: Qt.ImhFormattedNumbersOnly; placeholderText: "ex. 42" }
-
-        Label { text: "Strike (°)" }
-        TextField { id: strike; Layout.fillWidth: true; inputMethodHints: Qt.ImhFormattedNumbersOnly; placeholderText: "facultatif" }
-
-        Label { text: "Unité carte" }
-        TextField { id: uniteCarte; Layout.fillWidth: true; readOnly: true; placeholderText: "automatique avec carte géologique (plus tard)" }
-
-        Label { text: "Unité observée" }
-        TextField { id: uniteObs; Layout.fillWidth: true; placeholderText: "ex. Valanginien" }
-
-        Label { text: "Lithologie" }
-        TextField { id: lithologie; Layout.fillWidth: true; placeholderText: "ex. Calcaire" }
-
-        Label { text: "Faciès" }
-        TextField { id: facies; Layout.fillWidth: true; placeholderText: "ex. bioclastique" }
-
-        Label { text: "Note" }
-        TextArea { id: note; Layout.fillWidth: true; Layout.preferredHeight: 80; wrapMode: TextEdit.Wrap; placeholderText: "Observation libre" }
-
-        Button {
-          Layout.fillWidth: true
-          text: saving ? "ENREGISTREMENT..." : "ENREGISTRER CE PENDAGE"
-          enabled: detectedLayer !== null && !saving
-          onClicked: saveFeature()
-        }
-
-        Label {
-          Layout.fillWidth: true
-          wrapMode: Text.WordWrap
-          text: "V0.6 : écriture GeoPackage contrôlée, reprojection de la géométrie complète et protection contre les doubles clics."
-        }
-      }
+    function gpsInfo() {
+        if (!positionSource || !positionSource.active)
+            return null
+        var info = positionSource.positionInformation
+        if (!info)
+            return null
+        var lon = Number(info.longitude)
+        var lat = Number(info.latitude)
+        if (!isFinite(lon) || !isFinite(lat))
+            return null
+        return { "info": info, "lon": lon, "lat": lat }
     }
-  }
+
+    function updateGps() {
+        var g = gpsInfo()
+        if (!g) {
+            gpsLabel.text = "GPS : position non disponible"
+            return
+        }
+        gpsLabel.text = "GPS : " + g.lat.toFixed(6) + ", " + g.lon.toFixed(6)
+    }
+
+    function setAttributeIfPresent(feature, layer, fieldName, value) {
+        if (fieldExists(layer, fieldName))
+            feature.setAttribute(fieldName, value)
+    }
+
+    function refreshAfterSave(layer) {
+        // Force QField/QGIS to rebuild the rendered layer after the committed feature.
+        try {
+            if (layer && layer.triggerRepaint)
+                layer.triggerRepaint()
+        } catch (e1) {}
+
+        try {
+            if (mapCanvas && mapCanvas.refreshAllLayers)
+                mapCanvas.refreshAllLayers()
+        } catch (e2) {}
+
+        try {
+            if (mapCanvas && mapCanvas.refresh)
+                mapCanvas.refresh()
+        } catch (e3) {}
+    }
+
+    function saveFeature() {
+        if (saving)
+            return
+        saving = true
+
+        try {
+            var layer = detectBestLayer()
+            if (!layer) {
+                mainWindow.displayToast("ERREUR V0.7 : couche pendages introuvable")
+                saving = false
+                return
+            }
+
+            var g = gpsInfo()
+            if (!g) {
+                mainWindow.displayToast("ERREUR V0.7 : GPS non disponible")
+                saving = false
+                return
+            }
+
+            if (azimutField.text.trim() === "" || pendageField.text.trim() === "") {
+                mainWindow.displayToast("ERREUR V0.7 : azimut et pendage obligatoires")
+                saving = false
+                return
+            }
+
+            var az = Number(azimutField.text)
+            var dip = Number(pendageField.text)
+            if (!isFinite(az) || !isFinite(dip)) {
+                mainWindow.displayToast("ERREUR V0.7 : azimut/pendage invalides")
+                saving = false
+                return
+            }
+
+            var wgsGeometry = QfGeometryUtils.createGeometryFromWkt("POINT(" + g.lon + " " + g.lat + ")")
+            var geometry = QfGeometryUtils.reprojectGeometry(
+                        wgsGeometry,
+                        QfCoordinateReferenceSystemUtils.wgs84Crs(),
+                        layer.crs)
+
+            if (!geometry) {
+                mainWindow.displayToast("ERREUR V0.7 : création géométrie impossible")
+                saving = false
+                return
+            }
+
+            if (!layer.startEditing()) {
+                mainWindow.displayToast("ERREUR V0.7 : couche non modifiable")
+                saving = false
+                return
+            }
+
+            var feature = QfFeatureUtils.createFeature(layer, geometry, g.info)
+            if (!feature) {
+                layer.rollBack()
+                mainWindow.displayToast("ERREUR V0.7 : création entité impossible")
+                saving = false
+                return
+            }
+
+            setAttributeIfPresent(feature, layer, "azimut", az)
+            setAttributeIfPresent(feature, layer, "pendage", dip)
+
+            if (strikeField.text.trim() !== "") {
+                var strikeValue = Number(strikeField.text)
+                if (isFinite(strikeValue))
+                    setAttributeIfPresent(feature, layer, "strike", strikeValue)
+            }
+
+            setAttributeIfPresent(feature, layer, "unite_obs", uniteObsField.text.trim())
+            setAttributeIfPresent(feature, layer, "unite_carte", "")
+            setAttributeIfPresent(feature, layer, "unite", uniteObsField.text.trim())
+            setAttributeIfPresent(feature, layer, "lithologie", lithologieField.text.trim())
+            setAttributeIfPresent(feature, layer, "facies", faciesField.text.trim())
+            setAttributeIfPresent(feature, layer, "note", noteField.text.trim())
+            setAttributeIfPresent(feature, layer, "date_heure", Qt.formatDateTime(new Date(), "yyyy-MM-dd HH:mm:ss"))
+
+            if (!QfLayerUtils.addFeature(layer, feature)) {
+                layer.rollBack()
+                mainWindow.displayToast("ERREUR V0.7 : ajout de l'entité refusé")
+                saving = false
+                return
+            }
+
+            if (!layer.commitChanges()) {
+                layer.rollBack()
+                mainWindow.displayToast("ERREUR V0.7 : enregistrement GeoPackage impossible")
+                saving = false
+                return
+            }
+
+            lastUniteObs = uniteObsField.text.trim()
+            lastLithologie = lithologieField.text.trim()
+            lastFacies = faciesField.text.trim()
+
+            refreshAfterSave(layer)
+
+            mainWindow.displayToast("OK V0.7 — pendage enregistré et carte actualisée")
+
+            azimutField.text = ""
+            pendageField.text = ""
+            strikeField.text = ""
+            noteField.text = ""
+            saving = false
+            dialog.close()
+        } catch (e) {
+            saving = false
+            mainWindow.displayToast("ERREUR V0.7 : " + e)
+        }
+    }
+
+    Component.onCompleted: {
+        iface.addItemToPluginsToolbar(toolbarButton)
+    }
+
+    Component.onDestruction: {
+        iface.removeItemFromPluginsToolbar(toolbarButton)
+    }
+
+    QfToolButton {
+        id: toolbarButton
+        iconSource: "qrc:/themes/qfield/nodpi/ic_measurement.svg"
+        bgcolor: "#ffffff"
+        onClicked: {
+            detectBestLayer()
+            updateGps()
+            uniteObsField.text = lastUniteObs
+            lithologieField.text = lastLithologie
+            faciesField.text = lastFacies
+            dialog.open()
+        }
+    }
+
+    Dialog {
+        id: dialog
+        parent: mainWindow.contentItem
+        modal: true
+        title: "QField Clino v0.7 — Nouveau pendage"
+        width: Math.min(mainWindow.width * 0.94, 560)
+        height: Math.min(mainWindow.height * 0.90, 760)
+        anchors.centerIn: parent
+
+        contentItem: ScrollView {
+            clip: true
+            ColumnLayout {
+                width: parent.width
+                spacing: 10
+
+                Label {
+                    Layout.fillWidth: true
+                    text: detectedLayer ? "Couche : " + detectedLayer.name : "Couche : non détectée"
+                    wrapMode: Text.WordWrap
+                }
+
+                Label {
+                    id: gpsLabel
+                    Layout.fillWidth: true
+                    text: "GPS : ..."
+                    wrapMode: Text.WordWrap
+                }
+
+                Button {
+                    text: "Actualiser GPS"
+                    Layout.fillWidth: true
+                    onClicked: updateGps()
+                }
+
+                Label { text: "Azimut (°)" }
+                TextField {
+                    id: azimutField
+                    Layout.fillWidth: true
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                    placeholderText: "ex. 135"
+                }
+
+                Label { text: "Pendage (°)" }
+                TextField {
+                    id: pendageField
+                    Layout.fillWidth: true
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                    placeholderText: "ex. 42"
+                }
+
+                Label { text: "Strike (°) — facultatif" }
+                TextField {
+                    id: strikeField
+                    Layout.fillWidth: true
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                    placeholderText: "facultatif"
+                }
+
+                Label { text: "Unité carte" }
+                TextField {
+                    Layout.fillWidth: true
+                    readOnly: true
+                    placeholderText: "Automatique plus tard"
+                }
+
+                Label { text: "Unité observée" }
+                TextField {
+                    id: uniteObsField
+                    Layout.fillWidth: true
+                    placeholderText: "ex. Valanginien"
+                }
+
+                Label { text: "Lithologie" }
+                TextField {
+                    id: lithologieField
+                    Layout.fillWidth: true
+                    placeholderText: "ex. Calcaire"
+                }
+
+                Label { text: "Faciès" }
+                TextField {
+                    id: faciesField
+                    Layout.fillWidth: true
+                }
+
+                Label { text: "Note" }
+                TextArea {
+                    id: noteField
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 100
+                    wrapMode: TextEdit.Wrap
+                }
+
+                Button {
+                    Layout.fillWidth: true
+                    enabled: !saving
+                    text: saving ? "ENREGISTREMENT..." : "ENREGISTRER CE PENDAGE"
+                    onClicked: saveFeature()
+                }
+
+                Button {
+                    Layout.fillWidth: true
+                    text: "Fermer"
+                    enabled: !saving
+                    onClicked: dialog.close()
+                }
+            }
+        }
+    }
 }
