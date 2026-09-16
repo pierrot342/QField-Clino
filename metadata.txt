@@ -1,5 +1,5 @@
 [general]
 name=QField Clino
-description=Clinometre geologique pour QField - detection de couche et champs
- author=Projet QField Clino
-version=0.2
+description=Clinometre geologique pour QField - formulaire terrain et GPS
+author=Projet QField Clino
+version=0.3
