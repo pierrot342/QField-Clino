@@ -2,4 +2,4 @@
 name=QField Clino
 description=Clinometre geologique pour QField - formulaire terrain, GPS et enregistrement GeoPackage
 author=Projet QField Clino
-version=0.5
+version=0.6
